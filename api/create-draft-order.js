@@ -1,139 +1,126 @@
-// api/create-draft-order.js
+// Vercel API Endpoint: /api/create-draft-order.js
+// This handles draft order creation with custom pricing AND product images
 
 export default async function handler(req, res) {
-  // CORS headers
+  // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Handle preflight
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
-  // Health check for GET requests
-  if (req.method === 'GET') {
-    return res.status(200).json({
-      status: 'ok',
-      message: 'Draft Orders API ready. Send POST with line_items.',
-      configured: !!process.env.SHOPIFY_ACCESS_TOKEN
-    });
-  }
-
-  // Only POST allowed for creating orders
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    // Get line_items from request body
-    const { line_items, note, customer_email } = req.body;
+    const { line_items, note, customer } = req.body;
 
-    // Validate - accept both "line_items" and "items"
-    const items = line_items || req.body.items;
-
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ 
-        error: 'No items provided',
-        message: 'Please provide line_items array in request body'
-      });
+    if (!line_items || !Array.isArray(line_items) || line_items.length === 0) {
+      return res.status(400).json({ error: 'line_items array is required' });
     }
 
-    // Get Shopify credentials
-    const SHOPIFY_STORE = process.env.SHOPIFY_STORE || 'dollarblinds.myshopify.com';
-    const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+    // Build draft order line items
+    const draftLineItems = line_items.map(item => {
+      // Convert properties from object to array format for Shopify
+      const propertiesArray = [];
+      if (item.properties && typeof item.properties === 'object') {
+        Object.entries(item.properties).forEach(([name, value]) => {
+          if (value && !name.startsWith('_')) {  // Skip internal properties
+            propertiesArray.push({ name, value: String(value) });
+          }
+        });
+      }
 
-    if (!SHOPIFY_ACCESS_TOKEN) {
-      return res.status(500).json({ 
-        error: 'API not configured',
-        message: 'Missing SHOPIFY_ACCESS_TOKEN'
-      });
-    }
-
-    // Build line items for Shopify
-    const shopifyLineItems = items.map(item => {
+      // Build the line item
       const lineItem = {
-        title: item.title || 'Custom Shade',
-        price: String(item.price),
         quantity: parseInt(item.quantity) || 1,
-        requires_shipping: true,
-        taxable: true
+        properties: propertiesArray
       };
 
-      // Add properties if present
-      if (item.properties && typeof item.properties === 'object') {
-        lineItem.properties = Object.entries(item.properties).map(([name, value]) => ({
-          name: String(name),
-          value: String(value)
-        }));
+      // If variant_id is provided, use it (this enables product image in checkout)
+      if (item.variant_id) {
+        lineItem.variant_id = parseInt(item.variant_id);
+        // When using variant_id, we need to set price as a string
+        // This will override the variant's default price
+        lineItem.price = item.price;
+        console.log(`Line item with variant ${item.variant_id}, custom price: $${item.price}`);
+      } else {
+        // Custom line item (no variant) - no image in checkout
+        lineItem.title = item.title || 'Custom Shade';
+        lineItem.price = item.price;
+        lineItem.requires_shipping = true;
+        lineItem.taxable = true;
+        console.log(`Custom line item: ${lineItem.title}, price: $${item.price}`);
       }
 
       return lineItem;
     });
 
-    // Create draft order payload
-    const payload = {
+    // Build the draft order payload
+    const draftOrderPayload = {
       draft_order: {
-        line_items: shopifyLineItems,
-        note: note || 'Custom Shade Order - Dollar Blinds',
-        use_customer_default_address: true,
-        tags: 'custom-shade,draft-order-api'
+        line_items: draftLineItems,
+        use_customer_default_address: true
       }
     };
 
-    if (customer_email) {
-      payload.draft_order.email = customer_email;
+    // Add note if provided
+    if (note) {
+      draftOrderPayload.draft_order.note = note;
     }
 
-    console.log('Creating draft order:', JSON.stringify(payload, null, 2));
+    // Add customer if provided
+    if (customer && customer.email) {
+      draftOrderPayload.draft_order.customer = {
+        email: customer.email
+      };
+    }
 
-    // Call Shopify API
-    const response = await fetch(
-      `https://${SHOPIFY_STORE}/admin/api/2024-01/draft_orders.json`,
+    console.log('Creating draft order:', JSON.stringify(draftOrderPayload, null, 2));
+
+    // Create draft order via Shopify Admin API
+    const shopifyResponse = await fetch(
+      `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2024-01/draft_orders.json`,
       {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+          'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(draftOrderPayload)
       }
     );
 
-    const data = await response.json();
+    const shopifyData = await shopifyResponse.json();
 
-    if (!response.ok) {
-      console.error('Shopify error:', data);
-      return res.status(response.status).json({
-        error: 'Shopify API error',
-        details: data
+    if (!shopifyResponse.ok) {
+      console.error('Shopify API error:', shopifyData);
+      return res.status(shopifyResponse.status).json({
+        error: shopifyData.errors || 'Failed to create draft order',
+        details: shopifyData
       });
     }
 
-    const draftOrder = data.draft_order;
-
-    if (!draftOrder || !draftOrder.invoice_url) {
-      return res.status(500).json({
-        error: 'Invalid response from Shopify',
-        details: data
-      });
-    }
-
+    const draftOrder = shopifyData.draft_order;
     console.log('Draft order created:', draftOrder.id);
 
-    // Return success
+    // Return the invoice URL for checkout
     return res.status(200).json({
       success: true,
       draft_order_id: draftOrder.id,
       invoice_url: draftOrder.invoice_url,
       total_price: draftOrder.total_price,
-      name: draftOrder.name
+      subtotal_price: draftOrder.subtotal_price,
+      total_tax: draftOrder.total_tax
     });
 
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Server error:', error);
     return res.status(500).json({
-      error: 'Server error',
+      error: 'Internal server error',
       message: error.message
     });
   }
