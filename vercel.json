@@ -1,8 +1,9 @@
 {
+  "version": 2,
   "crons": [
     {
-      "path": "/api/cleanup-drafts",
-      "schedule": "*/30 * * * *"
+      "path": "/api/your-cron-endpoint",
+      "schedule": "0 0 * * *"
     }
   ]
 }
