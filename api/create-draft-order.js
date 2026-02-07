@@ -1,7 +1,11 @@
 // Vercel API Endpoint: /api/create-draft-order.js
-// This handles draft order creation with custom pricing AND product images
+// Version: 2.1 - Updated Feb 7, 2025
+// Added variant_id support for product images in checkout
 
 export default async function handler(req, res) {
+  console.log('=== INCOMING REQUEST ===');
+  console.log('Version: 2.1 - Feb 7 2025');
+  
   // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -18,42 +22,62 @@ export default async function handler(req, res) {
   try {
     const { line_items, note, customer } = req.body;
 
+    console.log('Line items received:', JSON.stringify(line_items, null, 2));
+
     if (!line_items || !Array.isArray(line_items) || line_items.length === 0) {
       return res.status(400).json({ error: 'line_items array is required' });
     }
 
     // Build draft order line items
-    const draftLineItems = line_items.map(item => {
+    const draftLineItems = line_items.map((item, index) => {
+      console.log(`--- Processing item ${index + 1} ---`);
+      
       // Convert properties from object to array format for Shopify
       const propertiesArray = [];
       if (item.properties && typeof item.properties === 'object') {
         Object.entries(item.properties).forEach(([name, value]) => {
-          if (value && !name.startsWith('_')) {  // Skip internal properties
+          // Skip internal properties (those starting with _)
+          if (value && !name.startsWith('_')) {
             propertiesArray.push({ name, value: String(value) });
           }
         });
       }
+      
+      console.log('Properties count:', propertiesArray.length);
 
-      // Build the line item
-      const lineItem = {
-        quantity: parseInt(item.quantity) || 1,
-        properties: propertiesArray
-      };
+      // Check if we have a variant_id
+      const hasVariantId = item.variant_id && String(item.variant_id).length > 0;
+      console.log('Has variant_id:', hasVariantId, '| Value:', item.variant_id || 'none');
 
-      // If variant_id is provided, use it (this enables product image in checkout)
-      if (item.variant_id) {
-        lineItem.variant_id = parseInt(item.variant_id);
-        // When using variant_id, we need to set price as a string
-        // This will override the variant's default price
-        lineItem.price = item.price;
-        console.log(`Line item with variant ${item.variant_id}, custom price: $${item.price}`);
+      let lineItem;
+
+      if (hasVariantId) {
+        // WITH VARIANT ID - Product image will show in checkout
+        lineItem = {
+          variant_id: parseInt(item.variant_id),
+          quantity: parseInt(item.quantity) || 1,
+          properties: propertiesArray
+        };
+        
+        // Set custom price
+        if (item.price) {
+          lineItem.price = String(item.price);
+        }
+        
+        console.log('Created line item WITH variant_id (image will show)');
+        
       } else {
-        // Custom line item (no variant) - no image in checkout
-        lineItem.title = item.title || 'Custom Shade';
-        lineItem.price = item.price;
-        lineItem.requires_shipping = true;
-        lineItem.taxable = true;
-        console.log(`Custom line item: ${lineItem.title}, price: $${item.price}`);
+        // WITHOUT VARIANT ID - Custom line item (no image in checkout)
+        lineItem = {
+          title: item.title || 'Custom Shade',
+          price: String(item.price),
+          quantity: parseInt(item.quantity) || 1,
+          requires_shipping: true,
+          taxable: true,
+          properties: propertiesArray
+        };
+        
+        console.log('Created CUSTOM line item (no image in checkout)');
       }
 
       return lineItem;
@@ -79,7 +103,7 @@ export default async function handler(req, res) {
       };
     }
 
-    console.log('Creating draft order:', JSON.stringify(draftOrderPayload, null, 2));
+    console.log('Sending to Shopify...');
 
     // Create draft order via Shopify Admin API
     const shopifyResponse = await fetch(
@@ -97,7 +121,7 @@ export default async function handler(req, res) {
     const shopifyData = await shopifyResponse.json();
 
     if (!shopifyResponse.ok) {
-      console.error('Shopify API error:', shopifyData);
+      console.error('Shopify API error:', JSON.stringify(shopifyData, null, 2));
       return res.status(shopifyResponse.status).json({
         error: shopifyData.errors || 'Failed to create draft order',
         details: shopifyData
@@ -105,7 +129,7 @@ export default async function handler(req, res) {
     }
 
     const draftOrder = shopifyData.draft_order;
-    console.log('Draft order created:', draftOrder.id);
+    console.log('SUCCESS - Draft order created:', draftOrder.id);
 
     // Return the invoice URL for checkout
     return res.status(200).json({
